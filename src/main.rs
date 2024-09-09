@@ -1,4 +1,4 @@
-use std::{fs, io, net::TcpStream};
+use std::{fs, io, net::TcpStream, thread, time::Duration};
 use websrv_rs::Builder;
 
 fn hello_ip(request: &TcpStream) -> io::Result<String> {
@@ -16,12 +16,19 @@ fn test(_request: &TcpStream) -> io::Result<String> {
     Ok(String::from("Test"))
 }
 
+#[allow(clippy::unnecessary_wraps)]
+fn sleep(_request: &TcpStream) -> io::Result<String> {
+    thread::sleep(Duration::from_secs(2));
+    Ok(String::from("Test"))
+}
+
 fn main() {
     let server = Builder::default()
         .add_host("127.0.0.1:3002")
         .add_route("/", hello_ip)
         .add_route("/html", html)
         .add_route("/test", test)
+        .add_route("/sleep", sleep)
         .build();
 
     match server.run() {
