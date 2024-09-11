@@ -5,46 +5,52 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
+use crate::Pool;
+
 type Callback = fn(&TcpStream) -> io::Result<String>;
 type RouteMap = HashMap<String, Callback>;
 
-#[derive(Default)]
 pub struct Server {
     host: String,
     routes: RouteMap,
+    pool: Pool,
 }
 
 impl Server {
-    fn respond(&self, stream: &mut TcpStream, method: &str, endpoint: &str) -> io::Result<()> {
-        if method.to_lowercase() != "get" {
-            stream.write_all("HTTP/1.1 405 Method Not Allowed\r\n\r\n".as_bytes())?;
-            return Ok(());
-        }
+    fn respond(stream: &mut TcpStream, cb: Callback) -> io::Result<()> {
+        let contents = cb(stream)?;
+        let length = contents.len();
 
-        if let Some(cb) = self.routes.get(endpoint) {
-            let contents = cb(stream)?;
-            let length = contents.len();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{contents}");
 
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{contents}");
-
-            stream.write_all(response.as_bytes())
-        } else {
-            stream.write_all("HTTP/1.1 404 NOT FOUND\r\n\r\n".as_bytes())
-        }
+        stream.write_all(response.as_bytes())
     }
 
     fn handle_stream(&self, mut stream: TcpStream) -> io::Result<()> {
         let reader = BufReader::new(&mut stream);
 
         if let Some(Ok(request)) = reader.lines().next() {
-            println!("{request}\n{stream:#?}");
-
             let mut split = request.split(' ');
 
             let method = split.next().ok_or(Error::from(ErrorKind::InvalidData))?;
             let endpoint = split.next().ok_or(Error::from(ErrorKind::InvalidData))?;
 
-            self.respond(&mut stream, method, endpoint)
+            if method.to_lowercase() != "get" {
+                return stream.write_all("HTTP/1.1 405 Method Not Allowed\r\n\r\n".as_bytes());
+            }
+
+            if let Some(cb) = self.routes.get(endpoint) {
+                let cb_c = *cb;
+
+                self.pool.execute(move || {
+                    println!("{request}\n{stream:#?}");
+                    Self::respond(&mut stream, cb_c).expect("valid callback");
+                });
+
+                Ok(())
+            } else {
+                stream.write_all("HTTP/1.1 404 NOT FOUND\r\n\r\n".as_bytes())
+            }
         } else {
             stream.write_all("HTTP/1.1 400 BAD REQUEST\r\n\r\n".as_bytes())
         }
@@ -71,16 +77,28 @@ pub struct Host;
 pub struct Builder<T> {
     host: String,
     routes: RouteMap,
+    pool_size: usize,
     _marker: PhantomData<T>,
 }
+
+const DEFAULT_POOL_SIZE: usize = 5;
 
 impl Default for Builder<NoHost> {
     fn default() -> Self {
         Builder {
             host: String::default(),
             routes: RouteMap::default(),
+            pool_size: DEFAULT_POOL_SIZE,
             _marker: PhantomData,
         }
+    }
+}
+
+impl<T> Builder<T> {
+    #[allow(clippy::must_use_candidate, clippy::return_self_not_must_use)]
+    pub fn set_pool_size(mut self, size: usize) -> Self {
+        self.pool_size = size;
+        self
     }
 }
 
@@ -95,6 +113,7 @@ impl Builder<NoHost> {
         Builder {
             host: host.to_string(),
             routes: self.routes,
+            pool_size: self.pool_size,
             _marker: PhantomData,
         }
     }
@@ -118,6 +137,7 @@ impl Builder<Host> {
         Server {
             host: self.host,
             routes: self.routes,
+            pool: Pool::new(self.pool_size),
         }
     }
 }

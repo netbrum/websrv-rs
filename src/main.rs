@@ -24,6 +24,7 @@ fn sleep(_request: &TcpStream) -> io::Result<String> {
 
 fn main() {
     let server = Builder::default()
+        .set_pool_size(10)
         .add_host("127.0.0.1:3002")
         .add_route("/", hello_ip)
         .add_route("/html", html)
