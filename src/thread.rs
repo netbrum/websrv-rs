@@ -7,7 +7,7 @@ pub type Job = Box<dyn FnOnce() + Send>;
 
 #[allow(dead_code)]
 pub struct Pool {
-    sender: mpsc::Sender<Job>,
+    sender: Option<mpsc::Sender<Job>>,
     workers: Vec<Worker>,
 }
 
@@ -23,7 +23,10 @@ impl Pool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        Self { sender, workers }
+        Self {
+            sender: Some(sender),
+            workers,
+        }
     }
 
     /// # Errors
@@ -38,14 +41,28 @@ impl Pool {
         T: FnOnce() + Send + 'static,
     {
         let job = Box::new(cb);
-        self.sender.send(job).unwrap();
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in &mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+
+            if let Some(handle) = worker.handle.take() {
+                handle.join().unwrap();
+            }
+        }
     }
 }
 
 #[allow(dead_code)]
 pub struct Worker {
     id: usize,
-    handle: thread::JoinHandle<()>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -56,13 +73,21 @@ impl Worker {
     #[must_use]
     pub fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Self {
         let handle = thread::spawn(move || loop {
-            let job = receiver.lock().unwrap().recv().unwrap();
+            let message = receiver.lock().unwrap().recv();
 
-            println!("Worker {id} executing");
+            if let Ok(job) = message {
+                println!("Worker {id} executing");
 
-            job();
+                job();
+            } else {
+                println!("Worker {id} disconnected");
+                break;
+            }
         });
 
-        Self { id, handle }
+        Self {
+            id,
+            handle: Some(handle),
+        }
     }
 }
